@@ -1,0 +1,12 @@
+{
+  "id": 1,
+  "name": "Test User",
+  "email": "testuser@example.com",
+  "isActive": true,
+  "roles": ["admin", "user"],
+  "profile": {
+    "age": 30,
+    "location": "Canberra",
+    "joinedDate": "2026-04-10"
+  }
+}
