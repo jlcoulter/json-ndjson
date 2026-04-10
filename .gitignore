@@ -1,0 +1,5 @@
+*.exe
+*.ndjson
+json/
+json-to-ndjson
+dist/
