@@ -1,126 +1,146 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
-	"flag"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"sync"
+    "bufio"
+    "bytes"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "io"
+    "os"
+    "path/filepath"
+    "sync"
+    "sync/atomic"
+    "time"
 )
 
 func main() {
-	inputDir := flag.String("input", "", "Path to input directory containing JSON files")
-	outputFile := flag.String("output", "", "Path to output NDJSON file")
-	deleteAfter := flag.Bool("delete", false, "Delete JSON files after processing")
-	workers := flag.Int("workers", 10, "Number of concurrent workers (e.g. 10000)")
+    startTime := time.Now()
 
-	flag.Parse()
+    inputDir := flag.String("input", "", "Path to input directory containing JSON files")
+    outputFile := flag.String("output", "", "Path to output NDJSON file")
+    deleteAfter := flag.Bool("delete", false, "Delete JSON files after processing")
+    workers := flag.Int("workers", 10, "Number of concurrent workers")
+    debug := flag.Bool("d", false, "Enable debug logging (ADDED resource logs)")
 
-	if *inputDir == "" || *outputFile == "" {
-		fmt.Println(
-			"Usage: go run main.go -input <input_dir> -output <output_file> [-delete] [-workers N]",
-		)
-		os.Exit(1)
-	}
+    flag.Parse()
 
-	out, err := os.OpenFile(*outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		fmt.Printf("Error creating output file: %v\n", err)
-		os.Exit(1)
-	}
-	defer out.Close()
+    if *inputDir == "" || *outputFile == "" {
+        fmt.Println("Usage: go run main.go -input <input_dir> -output <output_file> [-delete] [-workers N] [-d]")
+        os.Exit(1)
+    }
 
-	writer := bufio.NewWriter(out)
-	defer writer.Flush()
+    out, err := os.OpenFile(*outputFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+    if err != nil {
+        fmt.Printf("Error creating output file: %v\n", err)
+        os.Exit(1)
+    }
+    defer out.Close()
 
-	var writeMutex sync.Mutex
+    writer := bufio.NewWriter(out)
+    defer writer.Flush()
 
-	jobs := make(chan string, *workers*2)
-	var wg sync.WaitGroup
+    var (
+        writeMutex sync.Mutex
+        wg         sync.WaitGroup
+    )
 
-	// Workers
-	for i := 0; i < *workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for path := range jobs {
-				line, err := processFile(path)
-				if err != nil {
-					fmt.Printf("Error processing %s: %v\n", path, err)
-					continue
-				}
+    var processed uint64
+    var failed uint64
 
-				writeMutex.Lock()
-				_, werr := writer.Write(append(line, '\n'))
-				writeMutex.Unlock()
+    jobs := make(chan string, *workers*2)
 
-				if werr != nil {
-					fmt.Printf("Write error for %s: %v\n", path, werr)
-					continue
-				}
+    // Workers
+    for i := 0; i < *workers; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for path := range jobs {
+                line, err := processFile(path)
+                if err != nil {
+                    atomic.AddUint64(&failed, 1)
+                    fmt.Printf("ERROR processing %s: %v\n", path, err)
+                    continue
+                }
 
-				if *deleteAfter {
-					if err := os.Remove(path); err != nil {
-						fmt.Printf("Delete error for %s: %v\n", path, err)
-					}
-				}
-			}
-		}()
-	}
+                writeMutex.Lock()
+                _, werr := writer.Write(line)
+                if werr == nil {
+                    _, werr = writer.Write([]byte{'\n'})
+                }
+                writeMutex.Unlock()
 
-	// Walk directory add to channel
-	err = filepath.Walk(*inputDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+                if werr != nil {
+                    atomic.AddUint64(&failed, 1)
+                    fmt.Printf("ERROR writing %s: %v\n", path, werr)
+                    continue
+                }
 
-		if info.IsDir() {
-			return nil
-		}
+                atomic.AddUint64(&processed, 1)
 
-		if filepath.Ext(path) != ".json" {
-			return nil
-		}
+                if *debug {
+                    fmt.Printf("ADDED resource: %s\n", filepath.Base(path))
+                }
 
-		jobs <- path
-		return nil
-	})
+                if *deleteAfter {
+                    if err := os.Remove(path); err != nil {
+                        fmt.Printf("WARN delete failed %s: %v\n", path, err)
+                    }
+                }
+            }
+        }()
+    }
 
-	if err != nil {
-		fmt.Printf("Error walking directory: %v\n", err)
-		os.Exit(1)
-	}
+    // Walk input directory
+    err = filepath.Walk(*inputDir, func(path string, info os.FileInfo, err error) error {
+        if err != nil {
+            return err
+        }
+        if info.IsDir() || filepath.Ext(path) != ".json" {
+            return nil
+        }
+        jobs <- path
+        return nil
+    })
 
-	close(jobs)
-	wg.Wait()
+    if err != nil {
+        fmt.Printf("Error walking directory: %v\n", err)
+        os.Exit(1)
+    }
 
-	fmt.Println("NDJSON file created successfully")
+    close(jobs)
+    wg.Wait()
+
+    elapsed := time.Since(startTime)
+
+    fmt.Println("--------------------------------------------------")
+    fmt.Println("NDJSON creation complete")
+    fmt.Printf("Resources processed: %d\n", processed)
+    fmt.Printf("Resources failed   : %d\n", failed)
+    fmt.Printf("Time taken         : %s\n", elapsed.Round(time.Millisecond))
+    fmt.Println("--------------------------------------------------")
 }
 
 func processFile(path string) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
+    file, err := os.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    defer file.Close()
 
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
+    data, err := io.ReadAll(file)
+    if err != nil {
+        return nil, err
+    }
 
-	var js any
-	if err := json.Unmarshal(data, &js); err != nil {
-		return nil, fmt.Errorf("invalid JSON in %s: %w", path, err)
-	}
+    trimmed := bytes.TrimSpace(data)
+    if len(trimmed) == 0 {
+        return nil, fmt.Errorf("empty file")
+    }
 
-	line, err := json.Marshal(js)
-	if err != nil {
-		return nil, err
-	}
-
-	return line, nil
+    var compacted bytes.Buffer
+    if err := json.Compact(&compacted, trimmed); err != nil {
+        return nil, fmt.Errorf("invalid JSON: %w", err)
+    }
+    return compacted.Bytes(), nil
 }
