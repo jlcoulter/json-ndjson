@@ -3,3 +3,5 @@
 json/
 json-to-ndjson
 dist/
+input/
+output/
