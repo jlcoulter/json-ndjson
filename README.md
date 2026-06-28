@@ -2,7 +2,7 @@
 
 Bidirectional JSON ↔ NDJSON converter with streaming processing.
 
-Convert between JSON files and newline-delimited JSON (NDJSON) without loading the entire dataset into memory. Each mode processes data incrementally — memory usage stays flat regardless of input size.
+Convert between JSON files and newline-delimited JSON (NDJSON) without loading the entire dataset into memory. Each mode processes data incrementally — memory usage stays proportional to the largest single value, not the total dataset size.
 
 ## Modes
 
@@ -10,11 +10,11 @@ Convert between JSON files and newline-delimited JSON (NDJSON) without loading t
 
 ```bash
 json-to-ndjson json2ndjson -input ./data -output out.ndjson
-json-to-ndjson json2ndjson -input ./data -output out.ndjson -delete   # remove source files
+json-to-ndjson json2ndjson -input ./data -output out.ndjson -delete   # remove source files after success
 json-to-ndjson json2ndjson -input ./data -output out.ndjson -workers 20
 ```
 
-Reads all `.json` files from a directory, validates and compacts each one, and writes them as NDJSON (one JSON object per line). Each file is processed independently — memory scales with the largest single file, not the total dataset.
+Reads all `.json` files from a directory, validates and compacts each one, and writes them as NDJSON (one JSON object per line). Files are written in sorted filename order so output is deterministic across runs. Source files are only deleted after the output is flushed and synced to disk.
 
 ### ndjson2json — NDJSON stream → JSON array
 
@@ -22,15 +22,23 @@ Reads all `.json` files from a directory, validates and compacts each one, and w
 cat data.ndjson | json-to-ndjson ndjson2json > data.json
 ```
 
-Reads NDJSON from stdin, validates each line, and writes a single JSON array to stdout. Streams line by line — O(1) memory regardless of input size.
+Reads NDJSON from stdin, validates each line, and writes a single JSON array to stdout. Streams line by line — memory scales with the longest line, not the total input size.
+
+### ndjson2files — NDJSON stream → individual JSON files
+
+```bash
+cat data.ndjson | json-to-ndjson ndjson2files -output ./split
+```
+
+Reads NDJSON from stdin and writes each line as a separate numbered JSON file (`0001.json`, `0002.json`, etc.) in the output directory. Each file is compacted. The inverse of `json2ndjson`.
 
 ### compact — Compact JSON stream
 
 ```bash
-cat pretty.json | json-to-ndjson compact > compact.json
+cat pretty.json | json-to-ndjson compact > compacted.json
 ```
 
-Reads JSON values from stdin and writes compacted JSON to stdout. Uses `json.Decoder` for streaming — handles arbitrarily large inputs without buffering.
+Reads top-level JSON values from stdin and writes each compacted value to stdout. Memory scales with the largest single top-level value — each value is buffered entirely, but the stream between values is processed incrementally.
 
 ## Install
 
@@ -49,9 +57,9 @@ docker pull ghcr.io/jlcoulter/json-ndjson:latest
 On an AMD Ryzen 7 9800X3D, processing 10,000 NDJSON lines:
 
 ```
-BenchmarkNdjsonToJSON-16    	   577	   2034380 ns/op	 2164368 B/op	      15 allocs/op
-BenchmarkCompactStream-16   	   176	   6835381 ns/op	 4427097 B/op	   30029 allocs/op
-BenchmarkCompactFile-16     	653533	      1852 ns/op	     760 B/op	       5 allocs/op
+BenchmarkNdjsonToJSON-16      	   577	   2034380 ns/op	 2164368 B/op	      15 allocs/op
+BenchmarkCompactStream-16     	   176	   6835381 ns/op	 4427097 B/op	   30029 allocs/op
+BenchmarkCompactFile-16        	653533	      1852 ns/op	     760 B/op	       5 allocs/op
 ```
 
 ## Test
